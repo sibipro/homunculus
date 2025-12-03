@@ -59,7 +59,7 @@ export class MinionAgent extends Agent<Env, MinionState> {
     // Stream chat with tool calling
     const result = await streamChat({
       openai: this.getOpenAI(),
-      model: "gpt-4o",
+      model: "gpt-5",
       messages,
       tools,
       onToolCall: async (name, args) => this.callMcpTool(name, args),
@@ -127,7 +127,7 @@ export class MinionAgent extends Agent<Env, MinionState> {
 
       const result = await streamChat({
         openai: this.getOpenAI(),
-        model: "gpt-4o",
+        model: "gpt-5",
         messages: [{ role: "user", content: text }],
         tools,
         onToolCall: async (name, args) => this.callMcpTool(name, args),
