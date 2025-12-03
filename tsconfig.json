@@ -1,0 +1,15 @@
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ESNext"],
+    "strict": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "isolatedModules": true,
+    "types": ["@cloudflare/vitest-pool-workers", "node"]
+  },
+  "include": ["src/**/*.ts", "*.ts", "worker-configuration.d.ts"],
+  "exclude": ["node_modules"]
+}

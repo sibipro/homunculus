@@ -1,0 +1,35 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "minion",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-02-23",
+  "compatibility_flags": ["nodejs_compat"],
+
+  // Durable Objects binding for the Agent
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "MinionAgent",
+        "class_name": "MinionAgent"
+      }
+    ]
+  },
+
+  // Required migration for SQLite-backed Agent storage
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["MinionAgent"]
+    }
+  ],
+
+  // Enable observability for logs
+  "observability": {
+    "enabled": true
+  },
+
+  // Development port - unique to avoid conflicts
+  "dev": {
+    "port": 6977
+  }
+}
