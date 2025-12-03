@@ -1,93 +1,91 @@
 import OpenAI from "openai"
-import type {
-  ChatCompletionMessageParam,
-  ChatCompletionTool,
-  ChatCompletionMessageToolCall,
-} from "openai/resources/chat/completions"
 
-const MAX_TOOL_ROUNDS = 5
+interface McpServerConfig {
+  type: "mcp"
+  server_label: string
+  server_url: string
+  require_approval: "never" | "always"
+  headers?: Record<string, string>
+  allowed_tools?: string[]
+}
 
-interface ChatOptions {
+interface StreamChatOptions {
   openai: OpenAI
   model: string
-  messages: ChatCompletionMessageParam[]
-  tools?: ChatCompletionTool[]
-  systemPrompt?: string
-  onToolCall?: (name: string, args: Record<string, unknown>) => Promise<string>
+  input: string
+  mcpServers?: McpServerConfig[]
+  instructions?: string
+  onDelta?: (delta: string) => void
 }
 
-interface ChatResult {
+interface McpCall {
+  tool: string
+  arguments: string
+}
+
+interface StreamChatResult {
   content: string
-  toolCalls: Array<{ name: string; args: Record<string, unknown>; result: string }>
+  mcpCalls: McpCall[]
+  rawEvents: unknown[]
 }
 
-export const streamChat = async (options: ChatOptions): Promise<ChatResult> => {
-  const { openai, model, tools, systemPrompt, onToolCall } = options
+export const streamChat = async (options: StreamChatOptions): Promise<StreamChatResult> => {
+  const { openai, model, mcpServers, instructions, onDelta } = options
 
-  let messages: ChatCompletionMessageParam[] = systemPrompt
-    ? [{ role: "system", content: systemPrompt }, ...options.messages]
-    : [...options.messages]
+  let content = ""
+  const mcpCalls: McpCall[] = []
+  const rawEvents: unknown[] = []
 
-  const allToolCalls: ChatResult["toolCalls"] = []
-  let rounds = MAX_TOOL_ROUNDS
+  console.log(`[Chat] Starting with ${mcpServers?.length ?? 0} MCP servers`)
 
-  while (rounds > 0) {
-    rounds--
-
-    const response = await openai.chat.completions.create({
-      model,
-      messages,
-      tools: tools?.length ? tools : undefined,
-    })
-
-    const choice = response.choices[0]
-    const assistantMessage = choice.message
-
-    // No tool calls - we're done
-    if (!assistantMessage.tool_calls?.length) {
-      return {
-        content: assistantMessage.content ?? "",
-        toolCalls: allToolCalls,
-      }
-    }
-
-    // Process tool calls
-    messages.push(assistantMessage)
-
-    for (const toolCall of assistantMessage.tool_calls) {
-      if (toolCall.type !== "function") continue
-      const name = toolCall.function.name
-      const args = JSON.parse(toolCall.function.arguments ?? "{}")
-
-      console.log(`[Chat] Tool call: ${name}`, args)
-
-      let result = ""
-      if (onToolCall) {
-        result = await onToolCall(name, args)
-      } else {
-        result = JSON.stringify({ error: "No tool handler" })
-      }
-
-      allToolCalls.push({ name, args, result })
-
-      messages.push({
-        role: "tool",
-        tool_call_id: toolCall.id,
-        content: result,
-      })
-    }
-
-    // Continue loop for next round
-  }
-
-  // Exhausted rounds - make final call without tools
-  const finalResponse = await openai.chat.completions.create({
+  const stream = await openai.responses.create({
     model,
-    messages,
+    input: [{ role: "user", content: options.input }],
+    instructions,
+    tools: mcpServers,
+    stream: true,
   })
 
-  return {
-    content: finalResponse.choices[0].message.content ?? "",
-    toolCalls: allToolCalls,
+  for await (const event of stream) {
+    // Capture ALL raw events
+    rawEvents.push(event)
+    console.log(`[Event] ${event.type}:`, JSON.stringify(event, null, 2))
+
+    const eventType = event.type
+
+    // Text streaming
+    if (eventType === "response.output_text.delta") {
+      const delta = (event as any).delta ?? ""
+      content += delta
+      onDelta?.(delta)
+    }
+
+    // MCP call arguments finalized
+    if (eventType === "response.mcp_call_arguments.done") {
+      const e = event as { arguments?: string }
+      if (e.arguments) {
+        mcpCalls.push({ tool: "pending", arguments: e.arguments })
+      }
+    }
+
+    // MCP call output item done - get the tool name
+    if (eventType === "response.output_item.done") {
+      const e = event as { item?: { type?: string; name?: string; arguments?: string } }
+      if (e.item?.type === "mcp_call" && e.item?.name) {
+        // Update the last pending mcpCall with the correct tool name
+        const pendingCall = mcpCalls.find(c => c.tool === "pending")
+        if (pendingCall && e.item.arguments) {
+          pendingCall.tool = e.item.name
+          pendingCall.arguments = e.item.arguments
+        } else {
+          mcpCalls.push({ tool: e.item.name, arguments: e.item.arguments ?? "" })
+        }
+      }
+    }
   }
+
+  console.log(`[Chat] Total raw events captured: ${rawEvents.length}`)
+  console.log(`[Chat] MCP calls: ${mcpCalls.length}`)
+
+  return { content, mcpCalls, rawEvents }
 }

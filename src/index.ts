@@ -1,15 +1,14 @@
-import { Agent, type AgentNamespace, routeAgentRequest } from "agents"
+import { Agent, routeAgentRequest } from "agents"
 import OpenAI from "openai"
-import type { ChatCompletionMessageParam, ChatCompletionTool } from "openai/resources/chat/completions"
 import { SlackClient } from "./slack"
 import { streamChat } from "./chat"
 
 interface MinionState {
-  messages: ChatCompletionMessageParam[]
+  conversationHistory: string[]
 }
 
 export class MinionAgent extends Agent<Env, MinionState> {
-  initialState: MinionState = { messages: [] }
+  initialState: MinionState = { conversationHistory: [] }
 
   private openai: OpenAI | null = null
 
@@ -17,10 +16,26 @@ export class MinionAgent extends Agent<Env, MinionState> {
     if (!this.openai) {
       this.openai = new OpenAI({
         apiKey: this.env.OPENAI_API_KEY,
-        baseURL: this.env.AI_GATEWAY_URL,
+        baseURL: `https://gateway.ai.cloudflare.com/v1/${this.env.CLOUDFLARE_ACCOUNT_ID}/henchman/openai`,
       })
     }
     return this.openai
+  }
+
+  private getOpenAIMcpConfig() {
+    // Native MCP server configuration for OpenAI Responses API
+    return [
+      {
+        type: "mcp" as const,
+        server_label: "henchman",
+        server_url: this.env.MCP_SERVER_URL,
+        require_approval: "never" as const,
+        headers: {
+          "CF-Access-Client-Id": this.env.CF_ACCESS_CLIENT_ID,
+          "CF-Access-Client-Secret": this.env.CF_ACCESS_CLIENT_SECRET,
+        },
+      },
+    ]
   }
 
   async onRequest(request: Request): Promise<Response> {
@@ -46,36 +61,26 @@ export class MinionAgent extends Agent<Env, MinionState> {
   }
 
   private async handleChat(userMessage: string): Promise<Response> {
-    // Add user message to state
-    const messages: ChatCompletionMessageParam[] = [
-      ...this.state.messages,
-      { role: "user", content: userMessage },
-    ]
-
-    // Get MCP tools
-    const mcpState = this.getMcpServers()
-    const tools = this.mcpToolsToOpenAI(mcpState.tools ?? [])
-
-    // Stream chat with tool calling
     const result = await streamChat({
       openai: this.getOpenAI(),
       model: "gpt-5",
-      messages,
-      tools,
-      onToolCall: async (name, args) => this.callMcpTool(name, args),
+      input: userMessage,
+      mcpServers: this.getOpenAIMcpConfig(),
     })
 
     // Update state with conversation
     this.setState({
-      messages: [
-        ...messages,
-        { role: "assistant", content: result.content },
+      conversationHistory: [
+        ...this.state.conversationHistory,
+        `user: ${userMessage}`,
+        `assistant: ${result.content}`,
       ],
     })
 
     return Response.json({
       content: result.content,
-      toolCalls: result.toolCalls,
+      mcpCalls: result.mcpCalls,
+      rawEvents: result.rawEvents,
     })
   }
 
@@ -121,17 +126,16 @@ export class MinionAgent extends Agent<Env, MinionState> {
     })
 
     try {
-      // Get MCP tools and chat
-      const mcpState = this.getMcpServers()
-      const tools = this.mcpToolsToOpenAI(mcpState.tools ?? [])
-
       const result = await streamChat({
         openai: this.getOpenAI(),
         model: "gpt-5",
-        messages: [{ role: "user", content: text }],
-        tools,
-        onToolCall: async (name, args) => this.callMcpTool(name, args),
+        input: text,
+        mcpServers: this.getOpenAIMcpConfig(),
       })
+
+      // Log raw events for debugging
+      console.log(`[Minion] Slack response raw events: ${result.rawEvents.length}`)
+      console.log(`[Minion] MCP calls: ${result.mcpCalls.length}`)
 
       // Update message with response
       await slack.updateMessage({
@@ -147,38 +151,6 @@ export class MinionAgent extends Agent<Env, MinionState> {
         text: `_error: ${(error as Error).message}_`,
       })
     }
-  }
-
-  private async callMcpTool(name: string, args: Record<string, unknown>): Promise<string> {
-    const mcpState = this.getMcpServers()
-    const tool = mcpState.tools?.find((t: any) => t.name === name)
-
-    if (!tool) {
-      return JSON.stringify({ error: `Tool not found: ${name}` })
-    }
-
-    try {
-      // Use the mcp.callTool method from the Agent class
-      const result = await this.mcp.callTool({
-        serverId: tool.serverId,
-        name,
-        arguments: args,
-      })
-      return JSON.stringify(result)
-    } catch (error) {
-      return JSON.stringify({ error: (error as Error).message })
-    }
-  }
-
-  private mcpToolsToOpenAI(mcpTools: any[]): ChatCompletionTool[] {
-    return mcpTools.map((tool) => ({
-      type: "function" as const,
-      function: {
-        name: tool.name,
-        description: tool.description ?? "",
-        parameters: tool.inputSchema ?? { type: "object", properties: {} },
-      },
-    }))
   }
 }
 

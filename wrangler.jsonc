@@ -36,10 +36,12 @@
   // Secrets (set via wrangler secret put)
   // - OPENAI_API_KEY
   // - SLACK_BOT_TOKEN
-  // - AI_GATEWAY_URL (optional, defaults to OpenAI)
+  // - CF_ACCESS_CLIENT_ID
+  // - CF_ACCESS_CLIENT_SECRET
 
   // Default vars for local dev (override in .dev.vars)
   "vars": {
-    "AI_GATEWAY_URL": "https://api.openai.com/v1"
+    "CLOUDFLARE_ACCOUNT_ID": "382d3c952fa0f8bbf5fc8b9c7aa1db32",
+    "MCP_SERVER_URL": "https://henchman-mcp.sibi.fun/mcp"
   }
 }
