@@ -31,5 +31,15 @@
   // Development port - unique to avoid conflicts
   "dev": {
     "port": 6977
+  },
+
+  // Secrets (set via wrangler secret put)
+  // - OPENAI_API_KEY
+  // - SLACK_BOT_TOKEN
+  // - AI_GATEWAY_URL (optional, defaults to OpenAI)
+
+  // Default vars for local dev (override in .dev.vars)
+  "vars": {
+    "AI_GATEWAY_URL": "https://api.openai.com/v1"
   }
 }

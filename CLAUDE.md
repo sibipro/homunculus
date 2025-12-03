@@ -1,32 +1,57 @@
 # Minion Agent
 
-Cloudflare Agents SDK project with MCP client support.
+Cloudflare Agents SDK + OpenAI + MCP tools + Slack bot.
 
 ## Development
 
 ```bash
 pnpm install
 pnpm dev        # Runs on port 6977
-pnpm deploy     # Deploy to Cloudflare
+pnpm deploy
 ```
 
-## Port Assignment
+## Port
 
-**Port 6977** - Reserved for Minion agent development
+**6977** - Reserved for Minion
 
-## API Endpoints
+## Secrets
 
-All endpoints are prefixed with `/agents/minion-agent/default/`
-
-- `GET /health` - Health check
-- `POST /mcp/add` - Connect to an MCP server `{ serverUrl, name }`
-- `GET /mcp/state` - List connected MCP servers and tools
-- `POST /mcp/remove` - Disconnect from MCP server `{ serverId }`
-- `POST /chat` - Send a chat message `{ message }`
+```bash
+wrangler secret put OPENAI_API_KEY
+wrangler secret put SLACK_BOT_TOKEN
+```
 
 ## Architecture
 
-Uses the Cloudflare Agents SDK `Agent` class which extends Durable Objects with:
-- Built-in SQLite storage via `this.state` and `this.sql`
-- MCP client management via `addMcpServer()`, `getMcpServers()`, `removeMcpServer()`
-- AI tool integration via `getAITools()`
+```
+src/
+├── index.ts    # MinionAgent class - main entry
+├── chat.ts     # OpenAI chat with tool loop
+├── slack.ts    # Slack API client
+└── env.d.ts    # Environment type declarations
+```
+
+### Flow
+
+```
+Slack Webhook → MinionAgent → OpenAI (gpt-4o) → MCP Tools → Response → Slack
+```
+
+## API Endpoints
+
+All prefixed with `/agents/minion-agent/default/`
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/health` | GET | Health check |
+| `/chat` | POST | Direct chat `{ message: string }` |
+| `/slack/webhook` | POST | Slack events (mentions, messages) |
+
+## MCP Tools
+
+Connect MCP servers via the built-in Agent methods:
+- `this.addMcpServer(name, url)` - Connect
+- `this.getMcpServers()` - List servers + tools
+- `this.mcp.callTool({ serverId, name, arguments })` - Execute tool
+
+Tools are auto-converted to OpenAI function format for the chat loop.
