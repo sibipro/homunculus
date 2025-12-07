@@ -7,10 +7,18 @@ interface MinionState {
   conversationHistory: string[]
 }
 
+// Generate thread-based instance ID for conversation isolation
+const getThreadKey = (channel: string, thread_ts?: string, ts?: string): string => {
+  const threadRoot = thread_ts?.trim() || ts
+  if (!threadRoot) throw new Error("Missing timestamp for thread key")
+  return `${channel}-${threadRoot}`
+}
+
 export class MinionAgent extends Agent<Env, MinionState> {
   initialState: MinionState = { conversationHistory: [] }
 
   private openai: OpenAI | null = null
+  private slackMetadata: { channel: string; thread_ts: string; user: string } | null = null
 
   private getOpenAI(): OpenAI {
     if (!this.openai) {
@@ -22,13 +30,12 @@ export class MinionAgent extends Agent<Env, MinionState> {
     return this.openai
   }
 
-  private getOpenAIMcpConfig() {
-    // Native MCP server configuration for OpenAI Responses API
+  private getMcpConfig() {
     return [
       {
         type: "mcp" as const,
-        server_label: "henchman",
-        server_url: this.env.MCP_SERVER_URL,
+        server_label: "products",
+        server_url: "https://product-kb.sibi.fun/mcp",
         require_approval: "never" as const,
         headers: {
           "CF-Access-Client-Id": this.env.CF_ACCESS_CLIENT_ID,
@@ -38,127 +45,161 @@ export class MinionAgent extends Agent<Env, MinionState> {
     ]
   }
 
+  private getSystemPrompt() {
+    return `You are Minion, a Sibi property management assistant. You help property managers find products for their properties.
+
+## Tools Available
+
+### products (Product Knowledge Base)
+- describeProducts: Semantic search for products by description
+- filterProducts: Filter by category, manufacturer, price, specs
+- getProductBySku: Look up specific product by SKU
+- executeSqlQuery: Run SQL queries on product database
+
+## Guidelines
+- Use natural language descriptions when searching for products
+- For emergencies, prioritize finding solutions quickly
+- When a specific SKU is requested, look it up first, then find alternatives if unavailable
+- Include pricing and key specs in recommendations
+- Be helpful and concise`
+  }
+
   async onRequest(request: Request): Promise<Response> {
     const url = new URL(request.url)
 
-    // Health check
     if (url.pathname.endsWith("/health")) {
       return Response.json({ status: "ok", agent: "minion" })
     }
 
-    // Chat endpoint - direct OpenAI chat with MCP tools
     if (url.pathname.endsWith("/chat") && request.method === "POST") {
       const { message } = (await request.json()) as { message: string }
       return this.handleChat(message)
     }
 
-    // Slack webhook - handles mentions and messages
-    if (url.pathname.endsWith("/slack/webhook") && request.method === "POST") {
-      return this.handleSlackWebhook(request)
+    if (url.pathname.endsWith("/slack/message") && request.method === "POST") {
+      const metadata = (await request.json()) as { channel: string; thread_ts: string; user: string; text: string }
+      return this.handleSlackMessage(metadata)
     }
 
     return new Response("Not found", { status: 404 })
   }
 
-  private async handleChat(userMessage: string): Promise<Response> {
+  private async handleChat(message: string): Promise<Response> {
     const result = await streamChat({
       openai: this.getOpenAI(),
-      model: "gpt-5",
-      input: userMessage,
-      mcpServers: this.getOpenAIMcpConfig(),
+      model: "gpt-5-mini",
+      input: message,
+      mcpServers: this.getMcpConfig(),
+      instructions: this.getSystemPrompt(),
     })
 
-    // Update state with conversation
     this.setState({
       conversationHistory: [
         ...this.state.conversationHistory,
-        `user: ${userMessage}`,
+        `user: ${message}`,
         `assistant: ${result.content}`,
       ],
     })
 
-    return Response.json({
-      content: result.content,
-      mcpCalls: result.mcpCalls,
-      rawEvents: result.rawEvents,
-    })
+    return Response.json(result)
   }
 
-  private async handleSlackWebhook(request: Request): Promise<Response> {
-    const body = await request.json() as any
-
-    // URL verification challenge
-    if (body.type === "url_verification") {
-      return new Response(body.challenge, { headers: { "Content-Type": "text/plain" } })
-    }
-
-    // Ignore retries
-    if (request.headers.get("X-Slack-Retry-Num")) {
-      return new Response("ok")
-    }
-
-    // Handle app_mention or message events
-    const event = body.event
-    if (!event || (event.type !== "app_mention" && event.type !== "message")) {
-      return new Response("ok")
-    }
-
-    // Ignore bot messages
-    if (event.bot_id || event.subtype === "bot_message") {
-      return new Response("ok")
-    }
-
-    // Process async - respond immediately to Slack
-    this.ctx.waitUntil(this.processSlackMessage(event))
-
-    return new Response("ok")
-  }
-
-  private async processSlackMessage(event: any): Promise<void> {
+  private async handleSlackMessage(metadata: { channel: string; thread_ts: string; user: string; text: string }): Promise<Response> {
     const slack = new SlackClient(this.env.SLACK_BOT_TOKEN)
-    const text = event.text?.replace(/<@[A-Z0-9]+>/g, "").trim() ?? ""
 
-    // Post initial thinking message
     const initial = await slack.postMessage({
-      channel: event.channel,
-      thread_ts: event.thread_ts ?? event.ts,
+      channel: metadata.channel,
+      thread_ts: metadata.thread_ts,
       text: "_thinking..._",
     })
 
     try {
       const result = await streamChat({
         openai: this.getOpenAI(),
-        model: "gpt-5",
-        input: text,
-        mcpServers: this.getOpenAIMcpConfig(),
+        model: "gpt-5-mini",
+        input: metadata.text,
+        mcpServers: this.getMcpConfig(),
+        instructions: this.getSystemPrompt(),
       })
 
-      // Log raw events for debugging
-      console.log(`[Minion] Slack response raw events: ${result.rawEvents.length}`)
-      console.log(`[Minion] MCP calls: ${result.mcpCalls.length}`)
+      this.setState({
+        conversationHistory: [
+          ...this.state.conversationHistory,
+          `user: ${metadata.text}`,
+          `assistant: ${result.content}`,
+        ],
+      })
 
-      // Update message with response
       await slack.updateMessage({
-        channel: event.channel,
+        channel: metadata.channel,
         ts: initial.ts,
         text: result.content,
       })
+
+      return Response.json({ success: true })
     } catch (error) {
-      console.error("[Minion] Error:", error)
       await slack.updateMessage({
-        channel: event.channel,
+        channel: metadata.channel,
         ts: initial.ts,
         text: `_error: ${(error as Error).message}_`,
       })
+      return Response.json({ error: (error as Error).message }, { status: 500 })
     }
   }
 }
 
+// Handle Slack webhook at worker level, route to thread-specific agent instance
+const handleSlackWebhook = async (request: Request, env: Env): Promise<Response> => {
+  const body = (await request.json()) as any
+
+  // Skip retries
+  if (request.headers.get("X-Slack-Retry-Num")) return new Response("ok")
+
+  const event = body.event
+  if (!event || (event.type !== "app_mention" && event.type !== "message")) {
+    return new Response("ok")
+  }
+
+  // Skip bot messages
+  if (event.bot_id || event.subtype === "bot_message") return new Response("ok")
+
+  // Generate thread-specific instance ID
+  const threadKey = getThreadKey(event.channel, event.thread_ts, event.ts)
+  console.log(`[Minion] Routing to thread instance: ${threadKey}`)
+
+  // Strip bot mentions from text
+  const text = event.text?.replace(/<@[A-Z0-9]+>/g, "").trim() ?? ""
+
+  // Route to thread-specific agent instance
+  const agentRequest = new Request(
+    `https://minion.sibi.fun/agents/minion-agent/${threadKey}/slack/message`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        channel: event.channel,
+        thread_ts: event.thread_ts ?? event.ts,
+        user: event.user,
+        text,
+      }),
+    }
+  )
+
+  const response = await routeAgentRequest(agentRequest, env)
+  return response ?? new Response("ok")
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    const agentResponse = await routeAgentRequest(request, env, { cors: true })
-    if (agentResponse) return agentResponse
+    const url = new URL(request.url)
 
+    // Handle Slack webhook at worker level (before agent routing)
+    if (url.pathname.endsWith("/slack/webhook") && request.method === "POST") {
+      return handleSlackWebhook(request, env)
+    }
+
+    const response = await routeAgentRequest(request, env, { cors: true })
+    if (response) return response
     return new Response("Minion Agent", { status: 404 })
   },
 } satisfies ExportedHandler<Env>

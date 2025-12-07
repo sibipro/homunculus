@@ -1,6 +1,7 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "minion",
+  "account_id": "382d3c952fa0f8bbf5fc8b9c7aa1db32",
   "main": "src/index.ts",
   "compatibility_date": "2025-02-23",
   "compatibility_flags": ["nodejs_compat"],
