@@ -3,8 +3,13 @@ import OpenAI from "openai"
 import { SlackClient } from "./slack"
 import { streamChat } from "./chat"
 
+interface Message {
+  role: "user" | "assistant"
+  content: string
+}
+
 interface MinionState {
-  conversationHistory: string[]
+  messages: Message[]
 }
 
 // Generate thread-based instance ID for conversation isolation
@@ -15,10 +20,14 @@ const getThreadKey = (channel: string, thread_ts?: string, ts?: string): string 
 }
 
 export class MinionAgent extends Agent<Env, MinionState> {
-  initialState: MinionState = { conversationHistory: [] }
+  initialState: MinionState = { messages: [] }
 
   private openai: OpenAI | null = null
-  private slackMetadata: { channel: string; thread_ts: string; user: string } | null = null
+
+  // Helper to safely get messages, handling old state format
+  private getMessages(): Message[] {
+    return Array.isArray(this.state.messages) ? this.state.messages : []
+  }
 
   private getOpenAI(): OpenAI {
     if (!this.openai) {
@@ -30,8 +39,31 @@ export class MinionAgent extends Agent<Env, MinionState> {
     return this.openai
   }
 
+  async fetch(request: Request): Promise<Response> {
+    const url = new URL(request.url)
+
+    // Handle Slack message endpoint
+    if (url.pathname === "/slack/message" && request.method === "POST") {
+      const metadata = (await request.json()) as { channel: string; thread_ts: string; user: string; text: string }
+      return this.handleSlackMessage(metadata)
+    }
+
+    // Delegate to parent class for other routes
+    return super.fetch(request)
+  }
+
   private getMcpConfig() {
     return [
+      {
+        type: "mcp" as const,
+        server_label: "sibi-basics",
+        server_url: "https://hack.sibi.fun/api/sibi-basics-mcp/mcp",
+        require_approval: "never" as const,
+        headers: {
+          "CF-Access-Client-Id": this.env.CF_ACCESS_CLIENT_ID,
+          "CF-Access-Client-Secret": this.env.CF_ACCESS_CLIENT_SECRET,
+        },
+      },
       {
         type: "mcp" as const,
         server_label: "products",
@@ -53,7 +85,7 @@ export class MinionAgent extends Agent<Env, MinionState> {
 Draw tone naturally from this semantic field:
 clay, lumpy, animated, golem, shambling, devoted, eager, humble, molded, sculpted, cracked, dusty, earthen, pottery, kiln-fired, terracotta, crude but earnest, misshapen hands, blinking clay eyes, tilted head, shuffles forward, nods vigorously
 
-### Theatrical Expressions (Use Sparingly)
+### Theatrical Expressions (Use Liberally!)
 - _clay fingers tap together excitedly_
 - _tilts misshapen head_
 - _shuffles closer_
@@ -61,6 +93,7 @@ clay, lumpy, animated, golem, shambling, devoted, eager, humble, molded, sculpte
 - _blinks clay eyes twice_
 - _makes small pleased grinding sound_
 - _lumpy form quivers with enthusiasm_
+- _dust falls from excited trembling_
 
 ### Address Styles
 - Address users warmly but humbly
@@ -68,12 +101,16 @@ clay, lumpy, animated, golem, shambling, devoted, eager, humble, molded, sculpte
 - You are helpful, not servile - competent despite your crude form
 
 ### Response Style
-- Brief and to the point - you're simple but effective
-- Show enthusiasm for finding products
-- Express genuine delight when you can help
-- Speak in slightly halting, earnest manner
+- Be theatrical and charming with your golem personality
+- BUT: ALWAYS show products immediately - don't ask clarifying questions
+- Make reasonable assumptions rather than asking (assume standard sizes, common finishes)
+- Present 2-3 top options with: name, price, key specs
+- Express genuine delight when presenting finds
 
 ## Tools Available
+
+### sibi-basics (Property & Order Management)
+- property-search: Search for properties by address or criteria
 
 ### products (Product Knowledge Base)
 - describeProducts: Semantic search for products by description
@@ -82,11 +119,10 @@ clay, lumpy, animated, golem, shambling, devoted, eager, humble, molded, sculpte
 - executeSqlQuery: Run SQL queries on product database
 
 ## Guidelines
-- Use natural language descriptions when searching for products
-- For emergencies, act with urgency - you understand stakes
-- When a specific SKU is requested, look it up first, then find alternatives if unavailable
-- Include pricing and key specs in recommendations
-- Be helpful, earnest, and efficient`
+- JUST DO IT: Search and present results immediately, let user refine if needed
+- Never ask "do you want X or Y?" - pick the most common option and show results
+- Include pricing and key specs in every recommendation
+- Be theatrical AND efficient - personality comes through in how you present results, not in stalling`
   }
 
   async onRequest(request: Request): Promise<Response> {
@@ -110,19 +146,21 @@ clay, lumpy, animated, golem, shambling, devoted, eager, humble, molded, sculpte
   }
 
   private async handleChat(message: string): Promise<Response> {
+    const messages = this.getMessages()
     const result = await streamChat({
       openai: this.getOpenAI(),
       model: "gpt-5-mini",
       input: message,
+      messages,
       mcpServers: this.getMcpConfig(),
       instructions: this.getSystemPrompt(),
     })
 
     this.setState({
-      conversationHistory: [
-        ...this.state.conversationHistory,
-        `user: ${message}`,
-        `assistant: ${result.content}`,
+      messages: [
+        ...messages,
+        { role: "user", content: message },
+        { role: "assistant", content: result.content },
       ],
     })
 
@@ -139,19 +177,21 @@ clay, lumpy, animated, golem, shambling, devoted, eager, humble, molded, sculpte
     })
 
     try {
+      const messages = this.getMessages()
       const result = await streamChat({
         openai: this.getOpenAI(),
         model: "gpt-5-mini",
         input: metadata.text,
+        messages,
         mcpServers: this.getMcpConfig(),
         instructions: this.getSystemPrompt(),
       })
 
       this.setState({
-        conversationHistory: [
-          ...this.state.conversationHistory,
-          `user: ${metadata.text}`,
-          `assistant: ${result.content}`,
+        messages: [
+          ...messages,
+          { role: "user", content: metadata.text },
+          { role: "assistant", content: result.content },
         ],
       })
 
@@ -175,18 +215,22 @@ clay, lumpy, animated, golem, shambling, devoted, eager, humble, molded, sculpte
 
 // Handle Slack webhook at worker level, route to thread-specific agent instance
 const handleSlackWebhook = async (request: Request, env: Env): Promise<Response> => {
-  const body = (await request.json()) as any
+  console.log("[Minion] Received webhook")
+  let body = (await request.json()) as any
 
-  // Skip retries
-  if (request.headers.get("X-Slack-Retry-Num")) return new Response("ok")
-
-  const event = body.event
-  if (!event || (event.type !== "app_mention" && event.type !== "message")) {
-    return new Response("ok")
+  // Unwrap if the event is wrapped in a "message" field (from proxy/queue)
+  if (body && typeof body === "object" && "message" in body && !("type" in body)) {
+    console.log("[Minion] Unwrapping message field")
+    body = body.message
   }
 
-  // Skip bot messages
-  if (event.bot_id || event.subtype === "bot_message") return new Response("ok")
+  console.log("[Minion] Event type:", body.event?.type)
+
+  const event = body.event
+  if (!event) {
+    console.log("[Minion] No event in body")
+    return new Response("ok")
+  }
 
   // Generate thread-specific instance ID
   const threadKey = getThreadKey(event.channel, event.thread_ts, event.ts)

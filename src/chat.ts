@@ -8,25 +8,37 @@ interface McpServer {
   headers?: Record<string, string>
 }
 
+interface Message {
+  role: "user" | "assistant"
+  content: string
+}
+
 interface ChatOptions {
   openai: OpenAI
   model: string
   input: string
+  messages?: Message[]
   mcpServers: McpServer[]
   instructions?: string
   toolChoice?: "auto" | "required" | "none"
 }
 
 export const streamChat = async (options: ChatOptions) => {
-  const { openai, model, mcpServers, instructions, toolChoice = "required" } = options
+  const { openai, model, mcpServers, instructions, toolChoice = "auto", messages = [] } = options
 
   let content = ""
   const toolCalls: { name: string; arguments: string }[] = []
   const mcpCallsInProgress = new Map<string, { name: string }>()
 
+  // Build input array with conversation history + new message
+  const input = [
+    ...messages.map(m => ({ role: m.role, content: m.content })),
+    { role: "user" as const, content: options.input },
+  ]
+
   const stream = await openai.responses.create({
     model,
-    input: [{ role: "user", content: options.input }],
+    input,
     instructions,
     tools: mcpServers,
     tool_choice: toolChoice,

@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "safe-sibi-basics": {
+      "type": "stdio",
+      "command": "/Users/hypnodroid/mcp/run_safe_sibi_basics.sh",
+      "args": []
+    }
+  }
+}
