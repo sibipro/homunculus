@@ -8,33 +8,39 @@ interface McpServer {
   headers?: Record<string, string>
 }
 
-interface Message {
-  role: "user" | "assistant"
-  content: string
-}
-
 interface ChatOptions {
   openai: OpenAI
   model: string
   input: string
-  messages?: Message[]
   mcpServers: McpServer[]
   instructions?: string
-  toolChoice?: "auto" | "required" | "none"
+  previousResponseId?: string
+  minToolCalls?: number
 }
 
-export const streamChat = async (options: ChatOptions) => {
-  const { openai, model, mcpServers, instructions, toolChoice = "auto", messages = [] } = options
+interface RoundResult {
+  content: string
+  toolCalls: { name: string; arguments: string }[]
+  responseId?: string
+}
+
+const MAX_ROUNDS = 4
+
+const streamOneRound = async (options: {
+  openai: OpenAI
+  model: string
+  mcpServers: McpServer[]
+  instructions?: string
+  toolChoice: "auto" | "required" | "none"
+  input: Array<{ role: "user" | "developer"; content: string }>
+  previousResponseId?: string
+}): Promise<RoundResult> => {
+  const { openai, model, mcpServers, instructions, toolChoice, input, previousResponseId } = options
 
   let content = ""
+  let responseId: string | undefined
   const toolCalls: { name: string; arguments: string }[] = []
   const mcpCallsInProgress = new Map<string, { name: string }>()
-
-  // Build input array with conversation history + new message
-  const input = [
-    ...messages.map(m => ({ role: m.role, content: m.content })),
-    { role: "user" as const, content: options.input },
-  ]
 
   const stream = await openai.responses.create({
     model,
@@ -43,26 +49,30 @@ export const streamChat = async (options: ChatOptions) => {
     tools: mcpServers,
     tool_choice: toolChoice,
     stream: true,
+    ...(previousResponseId && { previous_response_id: previousResponseId }),
   })
 
   for await (const event of stream) {
+    if (event.type === "response.completed") {
+      const e = event as unknown as { response?: { id?: string } }
+      responseId = e.response?.id
+    }
+
     if (event.type === "response.output_text.delta") {
-      const e = event as { delta?: string }
+      const e = event as unknown as { delta?: string }
       content += e.delta ?? ""
     }
 
-    // Track MCP call starts - this has the tool name
     if (event.type === "response.output_item.added") {
-      const e = event as { item?: { id?: string; type?: string; name?: string } }
+      const e = event as unknown as { item?: { id?: string; type?: string; name?: string } }
       if (e.item?.type === "mcp_call" && e.item.id && e.item.name) {
         mcpCallsInProgress.set(e.item.id, { name: e.item.name })
         console.log(`[MCP] Tool call started: ${e.item.name}`)
       }
     }
 
-    // Capture arguments when done
     if (event.type === "response.mcp_call_arguments.done") {
-      const e = event as { item_id?: string; arguments?: string }
+      const e = event as unknown as { item_id?: string; arguments?: string }
       if (e.item_id) {
         const call = mcpCallsInProgress.get(e.item_id)
         if (call) {
@@ -73,5 +83,38 @@ export const streamChat = async (options: ChatOptions) => {
     }
   }
 
-  return { content, toolCalls }
+  return { content, toolCalls, responseId }
+}
+
+export const streamChat = async (options: ChatOptions) => {
+  const { openai, model, mcpServers, instructions, previousResponseId, minToolCalls = 3 } = options
+
+  const allToolCalls: { name: string; arguments: string }[] = []
+  let content = ""
+  let lastResponseId = previousResponseId
+
+  for (let round = 1; round <= MAX_ROUNDS; round++) {
+    const toolChoice = allToolCalls.length < minToolCalls ? "required" as const : "auto" as const
+
+    const input: Array<{ role: "user" | "developer"; content: string }> = round === 1
+      ? [{ role: "user", content: options.input }]
+      : [{ role: "developer", content: "The previous search was insufficient. Use different search terms, filters, or tools. Do not repeat previous searches. Keep searching until you have comprehensive results." }]
+
+    const result = await streamOneRound({
+      openai, model, mcpServers, instructions, toolChoice,
+      input,
+      previousResponseId: lastResponseId,
+    })
+
+    allToolCalls.push(...result.toolCalls)
+    content = result.content
+    lastResponseId = result.responseId
+
+    console.log(`[Chat] Round ${round}: ${result.toolCalls.length} tool calls, total: ${allToolCalls.length}`)
+
+    if (allToolCalls.length >= minToolCalls && content) break
+    if (result.toolCalls.length === 0) break
+  }
+
+  return { content, toolCalls: allToolCalls, responseId: lastResponseId }
 }

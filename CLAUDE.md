@@ -4,7 +4,7 @@ Cloudflare Agents SDK + OpenAI + MCP tools + Slack bot.
 
 ## Critical Requirements
 
-- **Model**: Always use `gpt-5-mini` - this is required
+- **Model**: Always use `gpt-5` - this is required
 - **Tool Choice**: Use `tool_choice: "required"` to force tool use
 - **API Docs**: See [docs/openai-responses-api.md](docs/openai-responses-api.md) for OpenAI Responses API reference
 - **Test Scenarios**: See [docs/test-scenarios.md](docs/test-scenarios.md) for user prompts and validation
@@ -48,7 +48,7 @@ scripts/test/
 ### Flow
 
 ```
-Slack Webhook → MinionAgent → OpenAI (gpt-5-mini) → MCP Tools → Response → Slack
+Slack Webhook → MinionAgent → OpenAI (gpt-5) → MCP Tools → Response → Slack
 ```
 
 ## OpenAI Responses API
@@ -59,7 +59,7 @@ This project uses OpenAI's **native MCP support** via the Responses API (`/v1/re
 
 ```typescript
 const stream = await openai.responses.create({
-  model: "gpt-5-mini",           // Required model
+  model: "gpt-5",           // Required model
   input: [{ role: "user", content: "..." }],
   instructions: "...",
   tools: mcpServers,             // Native MCP server config

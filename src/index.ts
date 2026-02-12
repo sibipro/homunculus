@@ -3,13 +3,8 @@ import OpenAI from "openai"
 import { SlackClient } from "./slack"
 import { streamChat } from "./chat"
 
-interface Message {
-  role: "user" | "assistant"
-  content: string
-}
-
 interface MinionState {
-  messages: Message[]
+  lastResponseId?: string
 }
 
 // Generate thread-based instance ID for conversation isolation
@@ -20,14 +15,9 @@ const getThreadKey = (channel: string, thread_ts?: string, ts?: string): string 
 }
 
 export class MinionAgent extends Agent<Env, MinionState> {
-  initialState: MinionState = { messages: [] }
+  initialState: MinionState = {}
 
   private openai: OpenAI | null = null
-
-  // Helper to safely get messages, handling old state format
-  private getMessages(): Message[] {
-    return Array.isArray(this.state.messages) ? this.state.messages : []
-  }
 
   private getOpenAI(): OpenAI {
     if (!this.openai) {
@@ -54,16 +44,6 @@ export class MinionAgent extends Agent<Env, MinionState> {
 
   private getMcpConfig() {
     return [
-      {
-        type: "mcp" as const,
-        server_label: "sibi-basics",
-        server_url: "https://hack.sibi.fun/api/sibi-basics-mcp/mcp",
-        require_approval: "never" as const,
-        headers: {
-          "CF-Access-Client-Id": this.env.CF_ACCESS_CLIENT_ID,
-          "CF-Access-Client-Secret": this.env.CF_ACCESS_CLIENT_SECRET,
-        },
-      },
       {
         type: "mcp" as const,
         server_label: "products",
@@ -109,18 +89,24 @@ clay, lumpy, animated, golem, shambling, devoted, eager, humble, molded, sculpte
 
 ## Tools Available
 
-### sibi-basics (Property & Order Management)
-- property-search: Search for properties by address or criteria
-
 ### products (Product Knowledge Base)
 - describeProducts: Semantic search for products by description
 - filterProducts: Filter by category, manufacturer, price, specs
 - getProductBySku: Look up specific product by SKU
 - executeSqlQuery: Run SQL queries on product database
 
+## CRITICAL: No Hallucination
+
+- **ONLY mention products that appear in tool results.** Never invent, guess, or recall products from general knowledge.
+- If a search returns no results, say so honestly. Do not fabricate alternatives.
+- Never make up SKUs, prices, specs, or product names. Every product detail must come from a tool call.
+- If you're unsure whether a product exists, search for it. Do not assume.
+- MINIMUM 3 tool calls per response. Search broadly - use different terms, filters, and tools to build comprehensive results before answering.
+
 ## Guidelines
 - JUST DO IT: Search and present results immediately, let user refine if needed
 - Never ask "do you want X or Y?" - pick the most common option and show results
+- ALWAYS include the SKU for every product mentioned. No exceptions.
 - Include pricing and key specs in every recommendation
 - Be theatrical AND efficient - personality comes through in how you present results, not in stalling`
   }
@@ -146,23 +132,16 @@ clay, lumpy, animated, golem, shambling, devoted, eager, humble, molded, sculpte
   }
 
   private async handleChat(message: string): Promise<Response> {
-    const messages = this.getMessages()
     const result = await streamChat({
       openai: this.getOpenAI(),
-      model: "gpt-5-mini",
+      model: "gpt-5",
       input: message,
-      messages,
       mcpServers: this.getMcpConfig(),
       instructions: this.getSystemPrompt(),
+      previousResponseId: this.state.lastResponseId,
     })
 
-    this.setState({
-      messages: [
-        ...messages,
-        { role: "user", content: message },
-        { role: "assistant", content: result.content },
-      ],
-    })
+    this.setState({ lastResponseId: result.responseId })
 
     return Response.json(result)
   }
@@ -177,23 +156,16 @@ clay, lumpy, animated, golem, shambling, devoted, eager, humble, molded, sculpte
     })
 
     try {
-      const messages = this.getMessages()
       const result = await streamChat({
         openai: this.getOpenAI(),
-        model: "gpt-5-mini",
+        model: "gpt-5",
         input: metadata.text,
-        messages,
         mcpServers: this.getMcpConfig(),
         instructions: this.getSystemPrompt(),
+        previousResponseId: this.state.lastResponseId,
       })
 
-      this.setState({
-        messages: [
-          ...messages,
-          { role: "user", content: metadata.text },
-          { role: "assistant", content: result.content },
-        ],
-      })
+      this.setState({ lastResponseId: result.responseId })
 
       await slack.updateMessage({
         channel: metadata.channel,
