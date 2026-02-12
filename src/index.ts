@@ -4,6 +4,35 @@ import { slackifyMarkdown } from "slackify-markdown"
 import { SlackClient } from "./slack"
 import { streamChat } from "./chat"
 
+const IMAGE_EXTENSIONS = [".png", ".jpg", ".jpeg", ".gif", ".webp"]
+const isImageUrl = (url: string) => IMAGE_EXTENSIONS.some(ext => url.toLowerCase().includes(ext))
+
+const toSlackBlocks = (markdown: string) => {
+  const blocks: unknown[] = []
+
+  // Split on markdown images, keeping them as separators
+  const parts = markdown.split(/(!\[[^\]]*\]\([^)]+\))/)
+
+  for (const part of parts) {
+    const imgMatch = part.match(/!\[([^\]]*)\]\(([^)]+)\)/)
+    if (imgMatch && isImageUrl(imgMatch[2])) {
+      blocks.push({ type: "image", image_url: imgMatch[2], alt_text: imgMatch[1] || "Product" })
+      continue
+    }
+
+    const text = slackifyMarkdown(part).trim()
+    if (!text) continue
+
+    const chunks = text.length <= 2900 ? [text] : text.match(/[\s\S]{1,2900}(?:\n|$)/g) ?? [text]
+    for (const chunk of chunks) {
+      blocks.push({ type: "section", text: { type: "mrkdwn", text: chunk.trim() } })
+    }
+  }
+
+  const fallback = slackifyMarkdown(markdown.replace(/!\[[^\]]*\]\([^)]+\)/g, "")).trim()
+  return { text: fallback, blocks }
+}
+
 interface MinionState {
   lastResponseId?: string
 }
@@ -170,10 +199,13 @@ clay, lumpy, animated, golem, shambling, devoted, eager, humble, molded, sculpte
 
       this.setState({ lastResponseId: result.responseId })
 
+      const { text, blocks } = toSlackBlocks(result.content)
+
       await slack.updateMessage({
         channel: metadata.channel,
         ts: initial.ts,
-        text: slackifyMarkdown(result.content),
+        text,
+        blocks,
       })
 
       return Response.json({ success: true })
