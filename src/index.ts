@@ -1,5 +1,6 @@
 import { Agent, routeAgentRequest } from "agents"
 import OpenAI from "openai"
+import { slackifyMarkdown } from "slackify-markdown"
 import { SlackClient } from "./slack"
 import { streamChat } from "./chat"
 
@@ -172,7 +173,7 @@ clay, lumpy, animated, golem, shambling, devoted, eager, humble, molded, sculpte
       await slack.updateMessage({
         channel: metadata.channel,
         ts: initial.ts,
-        text: result.content,
+        text: slackifyMarkdown(result.content),
       })
 
       return Response.json({ success: true })

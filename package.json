@@ -23,6 +23,7 @@
   "dependencies": {
     "agents": "^0.2.26",
     "openai": "^6.9.1",
+    "slackify-markdown": "^5.0.0",
     "zod": "^4.1.13"
   }
 }
