@@ -54,8 +54,14 @@ const streamOneRound = async (options: {
 
   for await (const event of stream) {
     if (event.type === "response.completed") {
-      const e = event as unknown as { response?: { id?: string } }
+      const e = event as unknown as { response?: { id?: string; status?: string } }
       responseId = e.response?.id
+      console.log(`[Stream] Response completed, status: ${e.response?.status}`)
+    }
+
+    if (event.type === "response.failed") {
+      const e = event as unknown as { response?: { error?: unknown } }
+      console.error(`[Stream] Response FAILED:`, JSON.stringify(e.response?.error))
     }
 
     if (event.type === "response.output_text.delta") {
@@ -77,8 +83,21 @@ const streamOneRound = async (options: {
         const call = mcpCallsInProgress.get(e.item_id)
         if (call) {
           toolCalls.push({ name: call.name, arguments: e.arguments ?? "" })
-          console.log(`[MCP] Tool call complete: ${call.name}`, e.arguments)
+          console.log(`[MCP] Tool call args done: ${call.name}`, e.arguments)
         }
+      }
+    }
+
+    if (event.type === "response.mcp_call.completed") {
+      const e = event as unknown as { item_id?: string }
+      const call = e.item_id ? mcpCallsInProgress.get(e.item_id) : undefined
+      console.log(`[MCP] Call completed: ${call?.name ?? e.item_id}`)
+    }
+
+    if (event.type === "response.output_item.done") {
+      const e = event as unknown as { item?: { type?: string; status?: string } }
+      if (e.item?.type === "mcp_call") {
+        console.log(`[MCP] Output item done, status: ${e.item.status}`)
       }
     }
   }
