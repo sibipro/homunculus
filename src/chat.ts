@@ -96,9 +96,13 @@ export const streamChat = async (options: ChatOptions) => {
   for (let round = 1; round <= MAX_ROUNDS; round++) {
     const toolChoice = allToolCalls.length < minToolCalls ? "required" as const : "auto" as const
 
+    const developerPrompt = allToolCalls.length >= minToolCalls
+      ? "You have enough search results. Now present your findings with specific product names, SKUs, and prices. Include product images as markdown."
+      : "The previous search was insufficient. Use different search terms, filters, or tools. Do not repeat previous searches."
+
     const input: Array<{ role: "user" | "developer"; content: string }> = round === 1
       ? [{ role: "user", content: options.input }]
-      : [{ role: "developer", content: "The previous search was insufficient. Use different search terms, filters, or tools. Do not repeat previous searches. Keep searching until you have comprehensive results." }]
+      : [{ role: "developer", content: developerPrompt }]
 
     const result = await streamOneRound({
       openai, model, mcpServers, instructions, toolChoice,
@@ -113,7 +117,7 @@ export const streamChat = async (options: ChatOptions) => {
     console.log(`[Chat] Round ${round}: ${result.toolCalls.length} tool calls, total: ${allToolCalls.length}`)
 
     if (allToolCalls.length >= minToolCalls && content) break
-    if (result.toolCalls.length === 0) break
+    if (result.toolCalls.length === 0 && content) break
   }
 
   return { content, toolCalls: allToolCalls, responseId: lastResponseId }
