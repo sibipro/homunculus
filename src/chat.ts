@@ -1,73 +1,138 @@
 import OpenAI from "openai"
+import type { ChatCompletionMessageParam, ChatCompletionTool, ChatCompletionMessageToolCall } from "openai/resources/chat/completions"
+import type { Client } from "@modelcontextprotocol/sdk/client/index.js"
 
-interface McpServer {
-  type: "mcp"
-  server_label: string
-  server_url: string
-  require_approval: "never" | "always"
-  headers?: Record<string, string>
-}
+const MAX_ROUNDS = 10
 
 interface ChatOptions {
   openai: OpenAI
   model: string
   input: string
-  mcpServers: McpServer[]
-  instructions?: string
-  previousResponseId?: string
+  instructions: string
+  mcpClient: Client
+  messages: ChatCompletionMessageParam[]
+}
+
+const listMcpAsTools = async (mcpClient: Client): Promise<ChatCompletionTool[]> => {
+  const { tools } = await mcpClient.listTools()
+  return tools.map((t) => ({
+    type: "function" as const,
+    function: {
+      name: t.name,
+      description: t.description ?? t.name,
+      parameters: (t.inputSchema ?? { type: "object", properties: {} }) as Record<string, unknown>,
+    },
+  }))
+}
+
+const executeTool = async (mcpClient: Client, name: string, args: string): Promise<string> => {
+  const parsed = JSON.parse(args)
+  const result = await mcpClient.callTool({ name, arguments: parsed })
+  if (!Array.isArray(result.content)) return JSON.stringify(result.content)
+  return result.content
+    .map((item) => {
+      const i = item as { type: string; text?: string }
+      return i.type === "text" ? i.text : JSON.stringify(i)
+    })
+    .join("\n")
+}
+
+const processToolCallDeltas = (
+  deltas: OpenAI.Chat.Completions.ChatCompletionChunk.Choice.Delta.ToolCall[],
+  toolCalls: ChatCompletionMessageToolCall[],
+  current: Partial<ChatCompletionMessageToolCall> | null,
+): Partial<ChatCompletionMessageToolCall> | null => {
+  for (const delta of deltas) {
+    if (delta.id) {
+      if (current?.id) toolCalls.push(current as ChatCompletionMessageToolCall)
+      current = {
+        id: delta.id,
+        type: "function" as const,
+        function: { name: delta.function?.name ?? "", arguments: delta.function?.arguments ?? "" },
+      }
+    } else if (current?.type === "function" && current.function && delta.function?.arguments) {
+      current.function.arguments += delta.function.arguments
+    }
+  }
+  return current
 }
 
 export const streamChat = async (options: ChatOptions) => {
-  const { openai, model, mcpServers, instructions, previousResponseId } = options
+  const { openai, model, instructions, mcpClient, messages } = options
 
-  let content = ""
-  let responseId: string | undefined
-  const toolCalls: { name: string; arguments: string }[] = []
-  const mcpCallsInProgress = new Map<string, { name: string }>()
+  const tools = await listMcpAsTools(mcpClient)
+  console.log(`[Chat] ${tools.length} MCP tools available`)
 
-  const stream = await openai.responses.create({
-    model,
-    input: [{ role: "user" as const, content: options.input }],
-    instructions,
-    tools: mcpServers,
-    tool_choice: "auto",
-    stream: true,
-    ...(previousResponseId && { previous_response_id: previousResponseId }),
-  })
+  const currentMessages: ChatCompletionMessageParam[] = [
+    { role: "system", content: instructions },
+    ...messages,
+    { role: "user", content: options.input },
+  ]
 
-  for await (const event of stream) {
-    if (event.type === "response.completed") {
-      const e = event as unknown as { response?: { id?: string; status?: string } }
-      responseId = e.response?.id
-    }
+  let fullText = ""
 
-    if (event.type === "response.failed") {
-      const e = event as unknown as { response?: { error?: unknown } }
-      console.error(`[Stream] Response FAILED:`, JSON.stringify(e.response?.error))
-    }
+  for (let round = 1; round <= MAX_ROUNDS; round++) {
+    const toolChoice = round === 1 && tools.length ? ("required" as const) : ("auto" as const)
 
-    if (event.type === "response.output_text.delta") {
-      const e = event as unknown as { delta?: string }
-      content += e.delta ?? ""
-    }
+    let toolCalls: ChatCompletionMessageToolCall[] = []
+    let currentToolCall: Partial<ChatCompletionMessageToolCall> | null = null
+    let assistantText = ""
 
-    if (event.type === "response.output_item.added") {
-      const e = event as unknown as { item?: { id?: string; type?: string; name?: string } }
-      if (e.item?.type === "mcp_call" && e.item.id && e.item.name) {
-        mcpCallsInProgress.set(e.item.id, { name: e.item.name })
-        console.log(`[MCP] ${e.item.name}`)
+    const stream = await openai.chat.completions.create({
+      model,
+      messages: currentMessages,
+      tools: tools.length ? tools : undefined,
+      tool_choice: tools.length ? toolChoice : undefined,
+      stream: true,
+    })
+
+    for await (const chunk of stream) {
+      const delta = chunk.choices[0]?.delta
+
+      if (delta?.content) {
+        assistantText += delta.content
+        fullText += delta.content
+      }
+
+      if (delta?.tool_calls) {
+        currentToolCall = processToolCallDeltas(delta.tool_calls, toolCalls, currentToolCall)
+      }
+
+      if (chunk.choices[0]?.finish_reason === "tool_calls" && currentToolCall?.id) {
+        toolCalls.push(currentToolCall as ChatCompletionMessageToolCall)
+        currentToolCall = null
       }
     }
 
-    if (event.type === "response.mcp_call_arguments.done") {
-      const e = event as unknown as { item_id?: string; arguments?: string }
-      if (e.item_id) {
-        const call = mcpCallsInProgress.get(e.item_id)
-        if (call) toolCalls.push({ name: call.name, arguments: e.arguments ?? "" })
+    if (currentToolCall?.id) toolCalls.push(currentToolCall as ChatCompletionMessageToolCall)
+
+    if (toolCalls.length === 0) {
+      console.log(`[Chat] Round ${round}: no tool calls, done`)
+      break
+    }
+
+    const toolNames = toolCalls.map((tc) => tc.type === "function" ? tc.function.name : "unknown")
+    console.log(`[Chat] Round ${round}: ${toolNames.join(", ")}`)
+
+    currentMessages.push({
+      role: "assistant",
+      content: assistantText || null,
+      tool_calls: toolCalls,
+    })
+
+    for (const tc of toolCalls) {
+      if (tc.type !== "function") continue
+      try {
+        const result = await executeTool(mcpClient, tc.function.name, tc.function.arguments)
+        console.log(`[Chat] ${tc.function.name} → ${result.length} chars`)
+        currentMessages.push({ role: "tool", tool_call_id: tc.id, content: result })
+      } catch (e) {
+        const error = (e as Error).message
+        console.error(`[Chat] ${tc.function.name} failed: ${error}`)
+        currentMessages.push({ role: "tool", tool_call_id: tc.id, content: JSON.stringify({ error }) })
       }
     }
   }
 
-  console.log(`[Chat] ${toolCalls.length} tool calls`)
-  return { content, toolCalls, responseId }
+  return { content: fullText, messages: currentMessages }
 }

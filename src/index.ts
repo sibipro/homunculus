@@ -1,6 +1,9 @@
 import { Agent, routeAgentRequest } from "agents"
 import OpenAI from "openai"
+import { Client } from "@modelcontextprotocol/sdk/client/index.js"
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js"
 import { slackifyMarkdown } from "slackify-markdown"
+import type { ChatCompletionMessageParam } from "openai/resources/chat/completions"
 import { SlackClient } from "./slack"
 import { streamChat } from "./chat"
 
@@ -34,7 +37,7 @@ const toSlackBlocks = (markdown: string) => {
 }
 
 interface MinionState {
-  lastResponseId?: string
+  messages: ChatCompletionMessageParam[]
 }
 
 // Generate thread-based instance ID for conversation isolation
@@ -45,9 +48,11 @@ const getThreadKey = (channel: string, thread_ts?: string, ts?: string): string 
 }
 
 export class MinionAgent extends Agent<Env, MinionState> {
-  initialState: MinionState = {}
+  initialState: MinionState = { messages: [] }
 
   private openai: OpenAI | null = null
+  private mcpClient: Client | null = null
+  private mcpInitPromise: Promise<void> | null = null
 
   private getOpenAI(): OpenAI {
     if (!this.openai) {
@@ -57,6 +62,31 @@ export class MinionAgent extends Agent<Env, MinionState> {
       })
     }
     return this.openai
+  }
+
+  private async ensureMcp(): Promise<Client> {
+    if (this.mcpClient) return this.mcpClient
+    if (!this.mcpInitPromise) {
+      this.mcpInitPromise = this.initMcp()
+    }
+    await this.mcpInitPromise
+    return this.mcpClient!
+  }
+
+  private async initMcp() {
+    const url = new URL("https://product-kb.sibi.fun/mcp")
+    const transport = new StreamableHTTPClientTransport(url, {
+      requestInit: {
+        headers: {
+          "CF-Access-Client-Id": this.env.CF_ACCESS_CLIENT_ID,
+          "CF-Access-Client-Secret": this.env.CF_ACCESS_CLIENT_SECRET,
+        },
+      },
+    })
+
+    this.mcpClient = new Client({ name: "homunculus", version: "1.0.0" }, { capabilities: {} })
+    await this.mcpClient.connect(transport)
+    console.log("[MCP] Connected to products server")
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -70,21 +100,6 @@ export class MinionAgent extends Agent<Env, MinionState> {
 
     // Delegate to parent class for other routes
     return super.fetch(request)
-  }
-
-  private getMcpConfig() {
-    return [
-      {
-        type: "mcp" as const,
-        server_label: "products",
-        server_url: "https://product-kb.sibi.fun/mcp",
-        require_approval: "never" as const,
-        headers: {
-          "CF-Access-Client-Id": this.env.CF_ACCESS_CLIENT_ID,
-          "CF-Access-Client-Secret": this.env.CF_ACCESS_CLIENT_SECRET,
-        },
-      },
-    ]
   }
 
   private getSystemPrompt() {
@@ -116,14 +131,6 @@ clay, lumpy, animated, golem, shambling, devoted, eager, humble, molded, sculpte
 - Make reasonable assumptions rather than asking (assume standard sizes, common finishes)
 - Present 2-3 top options with: name, price, key specs
 - Express genuine delight when presenting finds
-
-## Tools Available
-
-### products (Product Knowledge Base)
-- describeProducts: Semantic search for products by description
-- filterProducts: Filter by category, manufacturer, price, specs
-- getProductBySku: Look up specific product by SKU
-- executeSqlQuery: Run SQL queries on product database
 
 ## CRITICAL: Product Citation Rules
 
@@ -164,18 +171,20 @@ clay, lumpy, animated, golem, shambling, devoted, eager, humble, molded, sculpte
   }
 
   private async handleChat(message: string): Promise<Response> {
+    const mcpClient = await this.ensureMcp()
+
     const result = await streamChat({
       openai: this.getOpenAI(),
       model: "gpt-5",
       input: message,
-      mcpServers: this.getMcpConfig(),
       instructions: this.getSystemPrompt(),
-      previousResponseId: this.state.lastResponseId,
+      mcpClient,
+      messages: this.state.messages,
     })
 
-    this.setState({ lastResponseId: result.responseId })
+    this.setState({ messages: result.messages })
 
-    return Response.json(result)
+    return Response.json({ content: result.content })
   }
 
   private async handleSlackMessage(metadata: { channel: string; thread_ts: string; user: string; text: string }): Promise<Response> {
@@ -188,16 +197,18 @@ clay, lumpy, animated, golem, shambling, devoted, eager, humble, molded, sculpte
     })
 
     try {
+      const mcpClient = await this.ensureMcp()
+
       const result = await streamChat({
         openai: this.getOpenAI(),
         model: "gpt-5",
         input: metadata.text,
-        mcpServers: this.getMcpConfig(),
         instructions: this.getSystemPrompt(),
-        previousResponseId: this.state.lastResponseId,
+        mcpClient,
+        messages: this.state.messages,
       })
 
-      this.setState({ lastResponseId: result.responseId })
+      this.setState({ messages: result.messages })
 
       const { text, blocks } = toSlackBlocks(result.content)
 

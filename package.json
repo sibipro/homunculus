@@ -21,6 +21,7 @@
     "wrangler": "^4.51.0"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.26.0",
     "agents": "^0.2.26",
     "openai": "^6.9.1",
     "slackify-markdown": "^5.0.0",
