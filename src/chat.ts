@@ -15,27 +15,10 @@ interface ChatOptions {
   mcpServers: McpServer[]
   instructions?: string
   previousResponseId?: string
-  minToolCalls?: number
 }
 
-interface RoundResult {
-  content: string
-  toolCalls: { name: string; arguments: string }[]
-  responseId?: string
-}
-
-const MAX_ROUNDS = 4
-
-const streamOneRound = async (options: {
-  openai: OpenAI
-  model: string
-  mcpServers: McpServer[]
-  instructions?: string
-  toolChoice: "auto" | "required" | "none"
-  input: Array<{ role: "user" | "developer"; content: string }>
-  previousResponseId?: string
-}): Promise<RoundResult> => {
-  const { openai, model, mcpServers, instructions, toolChoice, input, previousResponseId } = options
+export const streamChat = async (options: ChatOptions) => {
+  const { openai, model, mcpServers, instructions, previousResponseId } = options
 
   let content = ""
   let responseId: string | undefined
@@ -44,10 +27,10 @@ const streamOneRound = async (options: {
 
   const stream = await openai.responses.create({
     model,
-    input,
+    input: [{ role: "user" as const, content: options.input }],
     instructions,
     tools: mcpServers,
-    tool_choice: toolChoice,
+    tool_choice: "auto",
     stream: true,
     ...(previousResponseId && { previous_response_id: previousResponseId }),
   })
@@ -56,7 +39,6 @@ const streamOneRound = async (options: {
     if (event.type === "response.completed") {
       const e = event as unknown as { response?: { id?: string; status?: string } }
       responseId = e.response?.id
-      console.log(`[Stream] Response completed, status: ${e.response?.status}`)
     }
 
     if (event.type === "response.failed") {
@@ -73,7 +55,7 @@ const streamOneRound = async (options: {
       const e = event as unknown as { item?: { id?: string; type?: string; name?: string } }
       if (e.item?.type === "mcp_call" && e.item.id && e.item.name) {
         mcpCallsInProgress.set(e.item.id, { name: e.item.name })
-        console.log(`[MCP] Tool call started: ${e.item.name}`)
+        console.log(`[MCP] ${e.item.name}`)
       }
     }
 
@@ -81,58 +63,11 @@ const streamOneRound = async (options: {
       const e = event as unknown as { item_id?: string; arguments?: string }
       if (e.item_id) {
         const call = mcpCallsInProgress.get(e.item_id)
-        if (call) {
-          toolCalls.push({ name: call.name, arguments: e.arguments ?? "" })
-          console.log(`[MCP] Tool call args done: ${call.name}`, e.arguments)
-        }
-      }
-    }
-
-    if (event.type === "response.mcp_call.completed") {
-      const e = event as unknown as { item_id?: string }
-      const call = e.item_id ? mcpCallsInProgress.get(e.item_id) : undefined
-      console.log(`[MCP] Call completed: ${call?.name ?? e.item_id}`)
-    }
-
-    if (event.type === "response.output_item.done") {
-      const e = event as unknown as { item?: { type?: string; status?: string } }
-      if (e.item?.type === "mcp_call") {
-        console.log(`[MCP] Output item done, status: ${e.item.status}`)
+        if (call) toolCalls.push({ name: call.name, arguments: e.arguments ?? "" })
       }
     }
   }
 
+  console.log(`[Chat] ${toolCalls.length} tool calls`)
   return { content, toolCalls, responseId }
-}
-
-export const streamChat = async (options: ChatOptions) => {
-  const { openai, model, mcpServers, instructions, previousResponseId, minToolCalls = 3 } = options
-
-  const allToolCalls: { name: string; arguments: string }[] = []
-  let content = ""
-  let lastResponseId = previousResponseId
-
-  for (let round = 1; round <= MAX_ROUNDS; round++) {
-    const toolChoice = "auto" as const
-
-    const input: Array<{ role: "user" | "developer"; content: string }> = round === 1
-      ? [{ role: "user", content: options.input }]
-      : [{ role: "developer", content: "Search with different terms or tools to find more options. Do not repeat previous searches." }]
-
-    const result = await streamOneRound({
-      openai, model, mcpServers, instructions, toolChoice,
-      input,
-      previousResponseId: lastResponseId,
-    })
-
-    allToolCalls.push(...result.toolCalls)
-    content = result.content
-    lastResponseId = result.responseId
-
-    console.log(`[Chat] Round ${round}: ${result.toolCalls.length} tool calls, total: ${allToolCalls.length}`)
-
-    if (content) break
-  }
-
-  return { content, toolCalls: allToolCalls, responseId: lastResponseId }
 }
